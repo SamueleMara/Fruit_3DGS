@@ -185,14 +185,6 @@ class Scene:
                 self.load_colmap()
             self.build_point_pixel_mapping()
 
-        # # 4. Build instance-aware clusters from masks
-        # if mask_dir is None:
-        #     raise RuntimeError("[Scene] mask_dir must be provided for instance-aware clustering")
-        # point_clusters = self.build_instance_seed_clusters(mask_dir)
-        # # Save raw mapping in the scene for debugging / visualization
-        # self.point_clusters = point_clusters  
-        # print(f"[DEBUG] COLMAP clusters: {point_clusters}")
-
         # 4. Bayesian Optimization for clustering parameters
         if mask_dir is None:
             raise RuntimeError("[Scene] mask_dir must be provided for instance-aware clustering")
@@ -502,11 +494,8 @@ class Scene:
         return point_to_pixels
         
     # ------------------------------------------------------------
-    # NEW FUNCTION: build instance-aware COLMAP seed clusters
+    # NEW FUNCTION: build instance-aware COLMAP seed clusters with BO-tunable params
     # ------------------------------------------------------------
-    # -------------------------
-    # Build clusters with BO-tunable params
-    # -------------------------
     # ---------- build_instance_seed_clusters (updated) ----------
     def build_instance_seed_clusters(
         self,
