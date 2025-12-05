@@ -1,62 +1,45 @@
-# Use official CUDA 11.7 base image
-FROM nvidia/cuda:11.7.1-devel-ubuntu22.04
+ARG CUDA_VERSION=12.8.0
+FROM nvidia/cuda:${CUDA_VERSION}-devel-ubuntu24.04
 
-# Set environment variables
 ENV DEBIAN_FRONTEND=noninteractive
-ENV TZ=Etc/UTC
+ENV LANG=C.UTF-8
+ENV LC_ALL=C.UTF-8
+ENV PATH=/opt/conda/bin:$PATH
 
-# Install dependencies
+# Required for RTX 5090 build
+ENV TORCH_CUDA_ARCH_LIST="12.0"
+
+# System deps
 RUN apt-get update && apt-get install -y \
+    build-essential \
+    cmake \
+    ninja-build \
     git \
     wget \
     curl \
-    build-essential \
-    g++-11 \
-    gcc-11 \
-    cmake \
-    ninja-build \
-    python3.7 \
-    python3.7-dev \
-    python3-pip \
-    python3.7-venv \
+    ca-certificates \
+    libglib2.0-0 \
+    libsm6 \
+    libxext6 \
+    libxrender-dev \
+    libgl1 \
     && rm -rf /var/lib/apt/lists/*
 
-# Set python3.7 as default
-RUN update-alternatives --install /usr/bin/python python /usr/bin/python3.7 1 && \
-    update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.7 1 && \
-    update-alternatives --install /usr/bin/pip pip /usr/bin/pip3 1
+# Install Miniconda
+RUN wget https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-x86_64.sh -O /tmp/miniconda.sh && \
+    bash /tmp/miniconda.sh -b -p /opt/conda && \
+    rm /tmp/miniconda.sh
 
-# Create working directory
-WORKDIR /workspace
+# Conda config + TOS
+RUN conda config --set always_yes yes && \
+    conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/main && \
+    conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/r
 
-# Clone Gaussian Splatting repository
-RUN git clone https://github.com/graphdeco-inria/gaussian-splatting.git
+# Create environment with a modern Python
+RUN conda create -n gaussian_splatting python=3.10 -y
 
-# Set working directory
-WORKDIR /workspace/gaussian-splatting
+ENV PATH=/opt/conda/envs/gaussian_splatting/bin:$PATH
 
-# Create virtual environment
-RUN python -m venv /opt/venv
-ENV PATH="/opt/venv/bin:$PATH"
-
-# Upgrade pip and install Python dependencies
-RUN pip install --upgrade pip
-
-# Install PyTorch and CUDA
-RUN pip install torch==1.13.1 torchvision==0.14.1 torchaudio==0.13.1 \
-    --extra-index-url https://download.pytorch.org/whl/cu117
-
-# Install dependencies
-RUN pip install plyfile tqdm
-
-# Set g++/gcc to version 11 for building the submodules
-ENV CC=/usr/bin/gcc-11
-ENV CXX=/usr/bin/g++-11
-
-# Install Gaussian Splatting submodules
-RUN pip install ./submodules/diff-gaussian-rasterization
-RUN pip install ./submodules/simple-knn
-
-# Set entrypoint
-CMD ["/bin/bash"]
+# Install PyTorch nightly for CUDA 12.8
+RUN pip3 install --pre torch torchvision --index-url https://download.pytorch.org/whl/nightly/cu128
 

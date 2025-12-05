@@ -24,7 +24,7 @@ from skopt import Optimizer
 # -----------------------------
 # Scene Initialization
 # -----------------------------
-def initialize_scene(colmap_dir, model_dir, mask_inst_dir, load_iteration=-1,num_its_BO=20):
+def initialize_scene(colmap_dir, model_dir, mask_inst_dir, load_iteration=-1,num_its_BO=20, resolution = 8):
     """
     Initialize a Scene and optionally load a trained segmented Gaussian model and COLMAP-seeded Gaussians.
 
@@ -50,7 +50,7 @@ def initialize_scene(colmap_dir, model_dir, mask_inst_dir, load_iteration=-1,num
     model_args._model_path = os.path.abspath(model_dir)
     model_args._images = "images"
     model_args._depths = ""
-    model_args._resolution = 1.0
+    model_args._resolution = resolution
     model_args._white_background = False
     model_args.train_test_exp = False
     model_args.data_device = "cuda"
@@ -70,7 +70,7 @@ def initialize_scene(colmap_dir, model_dir, mask_inst_dir, load_iteration=-1,num
     )
 
     gaussians = GaussianModel(sh_degree=dataset.sh_degree)
-    scene = Scene(dataset, gaussians, load_iteration=load_iteration, shuffle=False, resolution_scales=[1.0])
+    scene = Scene(dataset, gaussians, load_iteration=load_iteration, shuffle=False, resolution_scales=[1])
 
     print("[INFO] Loading COLMAP-seeded Gaussian model...")
     trained_gs_seg, colmap_seed_gaussians, scene_info = scene.load_with_colmap_seed(
@@ -347,10 +347,10 @@ def optimize_threshold_only(trained_gs_seg, n_calls=50):
 # -----------------------------
 def main():
 
-    colmap_dir = "/home/samuelemara/colmap/samuele/lemons_only_sam2_masked"
-    model_dir = "/home/samuelemara/gaussian-splatting-seg/output/28a55428-1"
-    mask_dir = "/home/samuelemara/Grounded-SAM-2-autodistill/samuele/Lemon_only/masks"
-    mask_inst_dir = "/home/samuelemara/Grounded-SAM-2-autodistill/samuele/Lemon_only/mask_instances"
+    colmap_dir = "/workspace/samuele/Colmap/tree_01_masked"
+    model_dir = "/workspace/output/ce90fd47-9"
+    mask_dir = "/workspace/samuele/Grounded_Sam/Fruit_Nerf_apple/masks"
+    mask_inst_dir = "/workspace/samuele/Grounded_Sam/Fruit_Nerf_apple/mask_instances"
     ply_path = os.path.join(model_dir, "point_cloud/iteration_30000/point_cloud.ply")
     out_ply_path = os.path.join(model_dir, "point_cloud/iteration_30000/scene_clusters.ply")
     filtered_ply_path = os.path.join(model_dir, "point_cloud/iteration_30000/filtered_scene_clusters.ply")
@@ -363,13 +363,15 @@ def main():
 
     # Number of BO optimization steps
     num_its_BO=100
+    res=8
 
     scene, dataset, colmap_seed, trained_gs_seg, scene_info = initialize_scene(
         colmap_dir,
         model_dir,
         mask_inst_dir,
         load_iteration=-1,
-        num_its_BO=num_its_BO
+        num_its_BO=num_its_BO,
+        resolution= res
     )
 
     full_model = scene.gaussians  # the original trained full-resolution GS model
@@ -416,82 +418,8 @@ def main():
     print("\n[Step] Visualizing clusters from COLMAP...")
     visualize_colmap_clusters(scene_info,scene)
     
-    # print(f"[DEBUG] topK_full['indices'] shape={topK_full['indices'].shape}, "
-    #     f"min={topK_full['indices'].min().item()}, max={topK_full['indices'].max().item()}")
-    # print(f"[DEBUG] topK_full['opacities'] shape={topK_full['opacities'].shape}, "
-    #     f"min={topK_full['opacities'].min().item()}, max={topK_full['opacities'].max().item()}")
-    # print(f"[DEBUG] Number of Gaussians with ≥1 contribution: {int((contrib_count>0).sum().item())} / {topK_full['indices'].shape[0]}")
-
-    # print(f"[DEBUG] kept_full.shape={kept_full.shape}, full_to_seg.shape={full_to_seg.shape}")
-    # print(f"[DEBUG] full_to_seg min={full_to_seg.min().item()}, max={full_to_seg.max().item()}")
-
-    # print(f"[DEBUG] topK_seg['indices'] shape={topK_seg['indices'].shape}, "
-    #     f"min={topK_seg['indices'].min().item()}, max={topK_seg['indices'].max().item()}")
-    # print(f"[DEBUG] topK_seg['opacities'] shape={topK_seg['opacities'].shape}, "
-    #     f"min={topK_seg['opacities'].min().item()}, max={topK_seg['opacities'].max().item()}")
-    # print(f"[DEBUG] Segmented Gaussians with ≥1 contribution: {int((seg_contrib_count>0).sum().item())} / {topK_seg['indices'].shape[0]}")
-    # print(f"[DEBUG] r_point_idx.shape={r_point_idx.shape}, r_gauss_idx.shape={r_gauss_idx.shape}, r_vals.shape={r_vals.shape}")
-    # print(f"[DEBUG] r_point_idx min={r_point_idx.min().item() if r_point_idx.numel()>0 else -1}, "
-    #     f"max={r_point_idx.max().item() if r_point_idx.numel()>0 else -1}")
-    # print(f"[DEBUG] r_gauss_idx min={r_gauss_idx.min().item() if r_gauss_idx.numel()>0 else -1}, "
-    #     f"max={r_gauss_idx.max().item() if r_gauss_idx.numel()>0 else -1}")
-    # print(f"[DEBUG] r_vals min={r_vals.min().item() if r_vals.numel()>0 else -1}, max={r_vals.max().item() if r_vals.numel()>0 else -1}")
-
-
-    # # ----------------------------------------------------
-    # # Train clustering using dynamic instance refinement
-    # # ----------------------------------------------------
-    # print("\n[Step] Training instance clusters...")
-    # xyz_final, logits_final, ids_final = train_clusters_dynamic_instance(
-    #     scene,
-    #     trained_gs_seg,
-    #     colmap_seed,
-    #     r_point_idx,
-    #     r_gauss_idx,
-    #     r_vals,
-    #     iterations=100,
-    #     lr=5e-4,
-    #     temperature=0.1,
-    #     max_dist=0.05,
-    #     debug=True
-    # )
-    # # print(f"[DEBUG] Final xyz shape={xyz_final.shape}, logits shape={logits_final.shape}, ids shape={ids_final.shape}")
-
-    # # ----------------------------------------------------
-    # # Save results
-    # # ----------------------------------------------------
-    # print("\n[Step] Saving updated Gaussian instance fields...")
-    # with torch.no_grad():
-    #     trained_gs_seg.instance_logits.copy_(logits_final)
-    #     trained_gs_seg.instance_ids.copy_(ids_final)
-
-    # # Save the full clustered PLY
-    # trained_gs_seg.save_clustered_ply(out_ply_path, cluster_ids=ids_final)
-
-    # print("\n[Step] Visualizing clusters from PLY...")
-    # visualize_clusters_from_ply(out_ply_path)
-
-
-    # # ------------------------------------------------------------------
-    # # FILTERING BASED ON COHERENCE
-    # # ------------------------------------------------------------------
-    # TH = 0.40
-    # print(f"\n[Step] Filtering gaussians with coherence > {TH} ...")
-
-    # trained_gs_seg, mask_filt = cluster_utils.filter_coherent_gaussians(trained_gs_seg, threshold=TH)
     
-    # # ------------------------------------------------------------------
-    # # SAVE FILTERED PLY USING segmented_gaussians DIRECTLY
-    # # ------------------------------------------------------------------
-    # print(f"\n[Step] Saving filtered PLY to: {filtered_ply_path}")
-
-    # trained_gs_seg.save_clustered_ply(filtered_ply_path, cluster_ids=trained_gs_seg.instance_ids)
-
-    # print("\n[Step] Visualizing FILTERED PLY...")
-    # visualize_clusters_from_ply(filtered_ply_path)
     # ----------------------------------------------------
-
-     # ----------------------------------------------------
     # Train clustering using dynamic instance refinement
     # ----------------------------------------------------
     lr = 5e-4
@@ -509,22 +437,7 @@ def main():
         max_dist=0.05,
         debug=True
     )
-
-    # # ----------------------------------------------------
-    # # Run BO Dense Instance Cluster Optimization
-    # # ----------------------------------------------------
-    # print("\n[Step] Running Bayesian Optimization on dense instance clusters...")
-    # best_params, trained_gs_seg = optimize_dense_instances(
-    #     scene,
-    #     trained_gs_seg,
-    #     colmap_seed,
-    #     r_point_idx,
-    #     r_gauss_idx,
-    #     r_vals,
-    #     n_calls=num_its_BO,
-    #     iterations=100,
-    #     lr=lr
-    # )
+    
 
     # ----------------------------------------------------
     # Optimize coherence threshold only

@@ -1,0 +1,10 @@
+Istruzioni per runnare il docker fruit_gs:
+
+(base) rhea@DTI-25731:~/shared/samueleWS/Fruit_GS$ docker run -it --gpus '"device=1"' -v $(pwd):/workspace -p 7007:7007 --name fruit_gs fruit_gs:latest /bin/bash
+
+
+
+
+
+
+

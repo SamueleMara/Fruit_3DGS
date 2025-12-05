@@ -8,7 +8,7 @@
  *
  * For inquiries contact  george.drettakis@inria.fr
  */
-
+#define TORCH_USE_ENUM_TO_INT_CAST
 #include <torch/extension.h>
 #include "rasterize_points.h"
 

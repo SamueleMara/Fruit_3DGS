@@ -34,10 +34,14 @@ setup(
                 os.path.join(this_dir, "third_party/glm")
             ],
             extra_compile_args={
-                "cxx": ["-O3", "-std=c++14"],
-                "nvcc": ["-O3", "-std=c++14", "-Xcompiler", "-fPIC"]
+                "cxx": ["-O3", "-std=c++17", "-fPIC"],
+                "nvcc": ["-O3", "-std=c++17", "-Xcompiler", "-fPIC"]
             }
         )
     ],
     cmdclass={'build_ext': BuildExtension}
 )
+
+
+
+

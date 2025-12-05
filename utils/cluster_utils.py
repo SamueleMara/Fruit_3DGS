@@ -8,7 +8,7 @@ from collections import defaultdict
 
 from tqdm import tqdm
 from scene.gaussian_model import GaussianModel
-from gaussian_renderer import render
+# from gaussian_renderer import render
 
 import torch.nn.functional as F
 import torch.nn as nn
@@ -104,7 +104,7 @@ def compute_topK_contributors(scene, K=8, bg_color=(0, 0, 0)):
         indices:   [N, C, K]  pixel indices (or -1)
         opacities: [N, C, K]  contribution weights (1.0)
     """
-    
+    from gaussian_renderer import render
 
     # ----------------------------------------
     # Prepare scene / buffers

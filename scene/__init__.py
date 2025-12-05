@@ -77,6 +77,9 @@ class Scene:
 
         self.train_cameras = {}
         self.test_cameras = {}
+        self.gs_cameras_by_id = {}
+        self.gs_cameras_by_name = {}
+        self.gs_cameras_scale = {}
 
         if os.path.exists(os.path.join(args.source_path, "sparse")):
             scene_info = sceneLoadTypeCallbacks["Colmap"](args.source_path, args.images, args.depths, args.eval, args.train_test_exp)
@@ -108,12 +111,27 @@ class Scene:
 
         for resolution_scale in resolution_scales:
             print("Loading Training Cameras")
-            self.train_cameras[resolution_scale] = cameraList_from_camInfos(
-                scene_info.train_cameras, resolution_scale, args, scene_info.is_nerf_synthetic, False, mask_dir=mask_dir
+            # Train cameras
+            train_list = cameraList_from_camInfos(
+                scene_info.train_cameras,
+                resolution_scale,
+                args,
+                scene_info.is_nerf_synthetic,
+                False,
+                mask_dir=mask_dir
             )
-            gs_camera_list = self.train_cameras[resolution_scale] 
-            self.gs_cameras = {Path(cam.image_name).stem: cam for cam in gs_camera_list}
-            
+            self.train_cameras[resolution_scale] = train_list
+
+            # Build mappings per resolution
+            self.gs_cameras_by_id = {cam.uid: cam for cam in train_list}
+            self.gs_cameras_by_name = {Path(cam.image_name).stem: cam for cam in train_list}
+            self.gs_cameras_scale = {
+                cam.uid: (cam.original_image.shape[2]/cam.image_width,
+                        cam.original_image.shape[1]/cam.image_height)
+                for cam in train_list
+            }
+
+            # Test cameras       
             print("Loading Test Cameras")
             self.test_cameras[resolution_scale] = cameraList_from_camInfos(
                 scene_info.test_cameras, resolution_scale, args, scene_info.is_nerf_synthetic, True, mask_dir=mask_dir
@@ -126,6 +144,8 @@ class Scene:
                                                            "point_cloud.ply"), args.train_test_exp)
         else:
             self.gaussians.create_from_pcd(scene_info.point_cloud, scene_info.train_cameras, self.cameras_extent)
+
+        self._precomputed_masks = None
 
     def save(self, iteration):
         point_cloud_path = os.path.join(self.model_path, "point_cloud/iteration_{}".format(iteration))
@@ -185,42 +205,35 @@ class Scene:
                 self.load_colmap()
             self.build_point_pixel_mapping()
 
-        # # 4. Build instance-aware clusters from masks
-        # if mask_dir is None:
-        #     raise RuntimeError("[Scene] mask_dir must be provided for instance-aware clustering")
-        # point_clusters = self.build_instance_seed_clusters(mask_dir)
-        # # Save raw mapping in the scene for debugging / visualization
-        # self.point_clusters = point_clusters  
-        # print(f"[DEBUG] COLMAP clusters: {point_clusters}")
-
         # 4. Bayesian Optimization for clustering parameters
         if mask_dir is None:
             raise RuntimeError("[Scene] mask_dir must be provided for instance-aware clustering")
-
-        if bo_optimize:
-            print("[Scene] Running Bayesian Optimization for instance clustering...")
-
-            # Precompute masks / overlaps / propagation ONCE
-            print("[Scene] Precomputing mask mappings and overlaps for BO (once)...")
-            mask_instances, point_to_masks, mask_to_points = masks_utils.compute_full_point_to_mask_instance_mapping(
-                self.points3D, self.images, mask_dir
-            )
-            overlaps = masks_utils.compute_mask_overlaps(point_to_masks, mask_to_points, min_shared=1, top_k=10**9,
-                                                        log=(print if False else (lambda *a, **k: None)))
-            multi_view_links = masks_utils.propagate_all_masks_gpu(
+        if self._precomputed_masks is None:
+            print("[Scene] Precomputing mask mappings, point-to-mask, and propagation (GPU)...")
+            mask_instances, point_to_masks, mask_to_points, multi_view_links = masks_utils.compute_and_propagate_masks(
                 points3D=self.points3D,
                 images=self.images,
-                mask_instances=mask_instances,
-                gs_cameras=self.gs_cameras,
+                mask_dir=mask_dir,
+                gs_cameras=self.gs_cameras_by_name,  # flattened dict: image_stem -> Camera
                 device="cuda"
             )
-            precomputed = {
+
+            overlaps = masks_utils.compute_mask_overlaps(
+                point_to_masks, mask_to_points, min_shared=1, top_k=10**9,
+                log=(print if False else (lambda *a, **k: None))
+            )
+
+            self._precomputed_masks = {
                 "mask_instances": mask_instances,
                 "point_to_masks": point_to_masks,
                 "mask_to_points": mask_to_points,
-                "overlaps": overlaps,
-                "multi_view_links": multi_view_links
+                "multi_view_links": multi_view_links,
+                "overlaps": overlaps
             }
+            print(f"[Scene] Cached precomputed masks for reuse.")
+
+        if bo_optimize:
+            print("[Scene] Running Bayesian Optimization for instance clustering...")
 
             # Wrap the BO objective with tqdm
             progress_bar = tqdm(total=num_its_BO, desc="[Scene] BO iterations", leave=True)
@@ -234,7 +247,7 @@ class Scene:
                     spatial_consistency_weight=spatial_weight,
                     refine_iters=1,
                     verbose=False,
-                    precomputed=precomputed,
+                    precomputed=self._precomputed_masks,
                     reuse_precomputed=True
                 )
 
@@ -292,10 +305,12 @@ class Scene:
                 jaccard_threshold=best_jaccard,
                 spatial_consistency_weight=best_spatial,
                 refine_iters=100,
-                verbose=True
+                verbose=True,
+                precomputed=self._precomputed_masks,
+                reuse_precomputed=True
             )
         else:
-            point_clusters = self.build_instance_seed_clusters(mask_dir)
+            point_clusters = self.build_instance_seed_clusters(mask_dir,precomputed=self._precomputed_masks, reuse_precomputed=True)
 
         self.point_clusters = point_clusters
         # print(f"[DEBUG] COLMAP clusters: {point_clusters}")
@@ -346,12 +361,17 @@ class Scene:
         trained_gaussians = None
         if load_iteration is not None:
             trained_model_seg_path = os.path.join(
-                model_path, "point_cloud", f"iteration_{load_iteration}", "scene_semantics_filtered.ply"
+                model_path, "point_cloud", f"iteration_{load_iteration}", "scene_mask_filtered_renderer.ply"
             )
             if os.path.exists(trained_model_seg_path):
                 print(f"[Scene] Loading trained Gaussian model from {trained_model_seg_path}")
                 trained_gaussians = GaussianModel(sh_degree=args.sh_degree)
                 trained_gaussians.load_ply(trained_model_seg_path, args.train_test_exp)
+                if trained_gaussians is not None:
+                    print(f"[OK] Scene initialized. Segmented Gaussians: {trained_gaussians.get_xyz.shape[0]}")
+                else:
+                    print(f"[OK] Scene initialized. No trained Gaussians loaded.")
+
 
         return trained_gaussians, seed_gaussians, scene_info
 
@@ -507,7 +527,6 @@ class Scene:
     # -------------------------
     # Build clusters with BO-tunable params
     # -------------------------
-    # ---------- build_instance_seed_clusters (updated) ----------
     def build_instance_seed_clusters(
         self,
         mask_dir,
@@ -521,33 +540,49 @@ class Scene:
         reuse_precomputed=True
     ):
         """
-        Build global instance clusters. If `precomputed` dict is provided and reuse_precomputed=True,
-        expensive mappings/overlaps/propagation will be re-used (required for efficient BO).
+        Build global instance clusters with instance-aware masks.
+        Heavy GPU propagation is computed only once per scene.
         """
-        # ---------- Step 0: mask-point mappings (cache-aware) ----------
+
+        # ---------- Step 0: decide which precomputed mapping to use ----------
         if precomputed is not None and reuse_precomputed:
-            mask_instances = precomputed.get("mask_instances", None)
-            point_to_masks = precomputed.get("point_to_masks", None)
-            mask_to_points = precomputed.get("mask_to_points", None)
-            overlaps = precomputed.get("overlaps", None)
-            multi_view_links = precomputed.get("multi_view_links", None)
-            if verbose:
-                print("[Scene] Using precomputed mask mappings/overlaps.")
-        else:
-            mask_instances, point_to_masks, mask_to_points = masks_utils.compute_full_point_to_mask_instance_mapping(
-                self.points3D, self.images, mask_dir
+            self._precomputed_masks = precomputed
+        elif self._precomputed_masks is None:
+            # Compute heavy mappings once
+            mask_instances, point_to_masks, mask_to_points, multi_view_links = masks_utils.compute_and_propagate_masks(
+                points3D=self.points3D,
+                images=self.images,
+                mask_dir=mask_dir,
+                gs_cameras=self.gs_cameras_by_name,  # flattened dict: image_stem -> Camera
+                device="cuda"
             )
-            overlaps = None
-            multi_view_links = None
+            overlaps = masks_utils.compute_mask_overlaps(
+                point_to_masks, mask_to_points, min_shared=min_shared, top_k=10**9,
+                log=(print if verbose else (lambda *a, **k: None))
+            )
+            self._precomputed_masks = {
+                "mask_instances": mask_instances,
+                "point_to_masks": point_to_masks,
+                "mask_to_points": mask_to_points,
+                "multi_view_links": multi_view_links,
+                "overlaps": overlaps
+            }
+            if verbose:
+                print("[Scene] Precomputed mask mappings stored for reuse.")
+        
+        # Now use cached/precomputed
+        mask_instances = self._precomputed_masks["mask_instances"]
+        point_to_masks = self._precomputed_masks["point_to_masks"]
+        mask_to_points = self._precomputed_masks["mask_to_points"]
+        overlaps = self._precomputed_masks["overlaps"]
+        multi_view_links = self._precomputed_masks["multi_view_links"]
 
         self.mask_instances = mask_instances
         self._cached_point_to_masks = point_to_masks
         self._cached_mask_to_points = mask_to_points
+        self._cached_multi_view_links = multi_view_links
 
-        # ---------- Step 1: overlaps (cache-aware) ----------
-        if overlaps is None:
-            overlaps = masks_utils.compute_mask_overlaps(point_to_masks, mask_to_points, min_shared=min_shared, top_k=10**9, log=(print if verbose else (lambda *a, **k: None)))
-        # ---------- Step 2: derive merged groups under current jaccard_threshold ----------
+        # ---------- Step 1: merge groups based on Jaccard ----------
         parent = {}
         def find_m(x):
             parent.setdefault(x, x)
@@ -571,40 +606,19 @@ class Scene:
         if verbose:
             print(f"[INFO] Found {len(merged_groups)} merge candidate groups with jaccard >= {jaccard_threshold}")
 
-        # ---------- Step 3: optionally run heavy propagation if not precomputed ----------
-        if multi_view_links is None:
-            multi_view_links = masks_utils.propagate_all_masks_gpu(
-                points3D=self.points3D,
-                images=self.images,
-                mask_instances=self.mask_instances,
-                gs_cameras=self.gs_cameras,
-                device=device
-            )
-        self._cached_multi_view_links = multi_view_links
+        # ---------- Step 2: initial point->instance assignment ----------
+        point_to_instance = {pid: masks[0] if masks else -1 for pid, masks in point_to_masks.items()}
 
-        # ---------- Step 4: initial point->instance assignment ----------
-        point_to_instance = {}
-        for pid, masks in point_to_masks.items():
-            point_to_instance[pid] = masks[0] if masks else -1
-
-        # ---------- Step 5: union merged_groups into root mapping ----------
-        # Build union-find over instances using merged_groups (re-using parent map)
-        # Note: parent already set by previous union_m calls, but ensure every mask key is present
+        # ---------- Step 3: union merged groups ----------
         for m in mask_to_points.keys():
             parent.setdefault(m, m)
-        # Now point->root -> cluster ids
-        clusters = {}
+        clusters = {pid: -1 for pid in self.points3D.keys()}
         cluster_id_map = {}
         cid = 0
-        def find_root_inst(inst):
-            parent.setdefault(inst, inst)
-            return find_m(inst)
-
         for pid, inst in point_to_instance.items():
             if inst == -1:
-                clusters[pid] = -1
                 continue
-            root = find_root_inst(inst)
+            root = find_m(inst)
             if root not in cluster_id_map:
                 cluster_id_map[root] = cid
                 cid += 1
@@ -612,7 +626,7 @@ class Scene:
 
         self.point_clusters = clusters
 
-        # Step 6: refine clusters using supplied spatial_consistency_weight
+        # ---------- Step 4: refine clusters ----------
         refine_clusters_with_metric(
             self,
             max_iters=refine_iters,
@@ -625,7 +639,6 @@ class Scene:
         )
 
         return self.point_clusters
-
 
     def build_gaussian_instance_adjacency(
         self,

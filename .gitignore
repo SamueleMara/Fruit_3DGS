@@ -4,7 +4,12 @@ logs/
 SIBR_viewers/
 submodules/fused-ssim/
 submodules/simple-knn/
+samuele/
+output/
+out/
 *.pyc
+*.zip
+*.tar
 .vscode
 output
 build

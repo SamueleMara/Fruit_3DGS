@@ -177,6 +177,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         loss = (1.0 - opt.lambda_dssim) * Ll1 + opt.lambda_dssim * (1.0 - ssim_value)
 
         if viewpoint_cam.mask is not None and contrib_indices is not None and contrib_opacities is not None:
+            torch.cuda.empty_cache()
             gt_mask = viewpoint_cam.mask.cuda()
             mask_loss = binary_mask_render_loss(
                 gaussians.semantic_mask,

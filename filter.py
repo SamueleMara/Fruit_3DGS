@@ -48,6 +48,19 @@ def filter_and_save(scene, mask_dir, iteration, K=2, semantic_threshold=0.3):
 
     # Iterate over cameras
     for cam in tqdm(cameras, desc="Filtering cameras"):
+
+        # ---- NEW: Use already-loaded mask ----
+        if cam.mask is None:
+            print(f"[WARN] No mask in camera {cam.image_name}, skipping.")
+            continue
+
+        # Ensure mask is on correct device & shape
+        mask_tensor = cam.mask.squeeze().detach().cpu().numpy()
+        H, W = mask_tensor.shape
+
+        # Convert mask to boolean (white = True)
+        mask_white = mask_tensor > 0.5
+
         render_out = render(
             cam,
             gaussians,
@@ -62,68 +75,53 @@ def filter_and_save(scene, mask_dir, iteration, K=2, semantic_threshold=0.3):
             continue
 
         contrib_indices = render_out["contrib_indices"].detach().cpu().numpy().astype(np.int32)
-        H, W, _ = contrib_indices.shape
 
-        # Load mask
-        image_basename = os.path.splitext(cam.image_name)[0]
-        possible_exts = [".png", ".jpg", ".jpeg"]
-        mask_path = None
-        for ext in possible_exts:
-            candidate = os.path.join(mask_dir, image_basename + ext)
-            if os.path.exists(candidate):
-                mask_path = candidate
-                break
+        # Safety check: ensure sizes match
+        if contrib_indices.shape[:2] != mask_white.shape:
+            print(f"[WARN] Mismatch in mask size for {cam.image_name}, resizing.")
+            mask_white = np.array(Image.fromarray(mask_white.astype(np.uint8)*255)
+                                  .resize(contrib_indices.shape[1::-1], Image.NEAREST)) > 127
 
-        if mask_path is None:
-            print(f"[WARN] Mask not found for {cam.image_name}, skipping.")
-            continue
-
-        mask_img = np.array(Image.open(mask_path).convert("L").resize((W, H), Image.NEAREST))
-        mask_white = mask_img > 127
-
-        # Contribution map: which pixels contribute to kept Gaussians
         white_y, white_x = np.where(mask_white)
         if len(white_y) == 0:
             continue
 
-        # Get Gaussian IDs that contributed to masked pixels
+        # Gaussians contributing to masked pixels
         gauss_ids = contrib_indices[white_y, white_x, :].reshape(-1)
         gauss_ids = gauss_ids[gauss_ids >= 0]
+
         if len(gauss_ids) == 0:
             continue
 
         unique_ids = np.unique(gauss_ids)
         keep_mask[unique_ids] = True
 
-        # Save mask as before
-        mask_save_path = os.path.join(vis_dir, f"{image_basename}_mask.png")
-        Image.fromarray(mask_white.astype(np.uint8) * 255).save(mask_save_path)
+        # Save visualization as before
+        base = os.path.splitext(cam.image_name)[0]
+        Image.fromarray(mask_white.astype(np.uint8) * 255).save(
+            os.path.join(vis_dir, f"{base}_mask.png")
+        )
 
-        # Create a proper contribution map
-        contrib_count = np.zeros((H, W), dtype=np.uint8)
-        for k in range(contrib_indices.shape[2]):
-            contrib_count[:, :, k] = (contrib_indices[:, :, k] >= 0).astype(np.uint8)
+        contrib_count = (contrib_indices >= 0).sum(axis=2)
+        if contrib_count.max() > 0:
+            contrib_norm = (contrib_count / contrib_count.max() * 255).astype(np.uint8)
+        else:
+            contrib_norm = contrib_count.astype(np.uint8)
 
-        contrib_map = contrib_count.sum(axis=2)
-        if contrib_map.max() > 0:
-            contrib_map = (contrib_map / contrib_map.max() * 255).astype(np.uint8)
+        # Contribution overlay
+        contrib_color = np.stack([contrib_norm]*3, axis=2)
+        contrib_color[mask_white, :] = [255, 0, 0]  # red overlay
 
-        # Overlay mask on contribution map (mask in red)
-        contrib_color = np.stack([contrib_map, contrib_map, contrib_map], axis=2)  # gray heatmap
-        contrib_color[mask_white, 0] = 255    # red channel
-        contrib_color[mask_white, 1] = 0      # green channel
-        contrib_color[mask_white, 2] = 0      # blue channel
-
-        contrib_save_path = os.path.join(vis_dir, f"{image_basename}_contrib_overlay.png")
-        Image.fromarray(contrib_color).save(contrib_save_path)
-
+        Image.fromarray(contrib_color).save(
+            os.path.join(vis_dir, f"{base}_contrib_overlay.png")
+        )
 
     # Combine with semantic mask
     keep_mask &= (semantic_mask > semantic_threshold)
 
     kept_count = int(keep_mask.sum().item())
     print(f"[INFO] Keeping {kept_count}/{N} Gaussians after filtering")
-
+    
     if kept_count == 0:
         print("[WARN] No Gaussians selected — saving original scene.")
         filtered_ply_path = os.path.join(output_dir, "scene_mask_filtered_renderer.ply")
@@ -140,3 +138,4 @@ def filter_and_save(scene, mask_dir, iteration, K=2, semantic_threshold=0.3):
     gaussians.save_ply(filtered_ply_path)
     print(f"[OK] Filtered scene saved to: {filtered_ply_path}")
     print(f"[OK] Saved mask and contribution images to: {vis_dir}")
+

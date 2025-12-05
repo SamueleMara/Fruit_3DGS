@@ -34,7 +34,9 @@ class Camera(nn.Module):
         self.FoVx = FoVx
         self.FoVy = FoVy
         self.image_name = image_name
-
+        self.orig_width = image.width   
+        self.orig_height = image.height 
+        
         # Device
         try:
             self.data_device = torch.device(data_device)
@@ -91,26 +93,37 @@ class Camera(nn.Module):
         self.mask = None
         if mask_dir is not None:
             base_name = os.path.splitext(self.image_name)[0]
-            pattern = os.path.join(mask_dir, base_name + ".*")
-            matches = glob.glob(pattern)
-            if matches:
-                mask_path = matches[0]  # take first match
-                mask_img = imageio.imread(mask_path)
+            # Accept both lowercase and uppercase extensions
+            exts = ["png", "jpg", "jpeg", "bmp", "tif", "tiff"]
+            exts += [e.upper() for e in exts]  # add uppercase variants
 
-                # Convert to float tensor 0..1
+            mask_path = None
+            for ext in exts:
+                pattern = os.path.join(mask_dir, base_name + f".{ext}")
+                matches = glob.glob(pattern)
+                if matches:
+                    mask_path = matches[0]
+                    break
+
+            if mask_path:
+                mask_img = imageio.imread(mask_path)
                 mask_tensor = torch.from_numpy(mask_img.astype(np.float32) / 255.0)
-                
-                # If RGB mask, convert to single channel by taking mean or first channel
+
+                # If RGB, convert to single channel
                 if mask_tensor.ndim == 3:
-                    mask_tensor = mask_tensor[..., 0]  # take first channel
-                
-                # Resize to camera resolution
-                mask_tensor = cv2.resize(mask_tensor.numpy(), (self.image_width, self.image_height))
-                self.mask = torch.from_numpy(mask_tensor).float().to(self.data_device)
+                    mask_tensor = mask_tensor[..., 0]
+
+                # Resize to match image size
+                mask_tensor_resized = cv2.resize(
+                    mask_tensor.numpy(),
+                    (self.image_width, self.image_height),
+                    interpolation=cv2.INTER_LINEAR
+                )
+                self.mask = torch.from_numpy(mask_tensor_resized).float().to(self.data_device)
             else:
                 print(f"[WARNING] No mask found for camera {self.image_name} in {mask_dir}")
                 self.mask = None
-        
+
 class MiniCam:
     def __init__(self, width, height, fovy, fovx, znear, zfar, world_view_transform, full_proj_transform):
         self.image_width = width
