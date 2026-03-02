@@ -47,7 +47,6 @@ Unlike fruit-specific pipelines, Fruit3DGS:
 This repository extends:
 
 **3D Gaussian Splatting for Real-Time Radiance Field Rendering**  
-Kerbl et al., ACM TOG 2023  
 
 Official repository:  
 https://github.com/graphdeco-inria/gaussian-splatting  
