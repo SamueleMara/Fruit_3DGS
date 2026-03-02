@@ -26,3 +26,9 @@ __pycache__/
 *.egg-info/
 build/
 dist/
+
+# Personal / debug folders
+debug_masks_instances/
+old_script/
+istruzioni/
+samuele/

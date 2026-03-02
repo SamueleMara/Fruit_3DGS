@@ -1,8 +1,0 @@
-Cose da fare per migliorare il GS segmentato:
-
-- cambiare tutti i device="cuda" nel GaussianModel con il numero della GPU desiderato
-- capire bene chi carica cosa e dove (cpu, gpu 0, 1 ecc)
-- specificare GPU come argomento
-- ⁠salvare ogni 5k iterazioni
-- ⁠salvare a fine train grafico delle loss rispetto alle iterazioni
-- ⁠salvare un txt dentro la cartella del modello con dentro tutte le specifiche del train (contributori, gpu e altri hyperparametri)
