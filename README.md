@@ -12,7 +12,7 @@ Samuele Mara, Angelo Moroncelli, Marco Maccarini, Loris Roveda
 ## 📄 Paper
 
 **Fruit3DGS: Fruit Counting and Localization with 3D Gaussian Splatting and Contrastive Learning**  
-*Computers and Electronics in Agriculture (2026)*  
+
 
 ---
 
