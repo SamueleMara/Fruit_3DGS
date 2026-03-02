@@ -184,7 +184,7 @@ The Fruit3DGS localization dataset includes:
 Repository & dataset:  
 https://github.com/SamueleMara/Fruit_3DGS  
 
----
+<!-- ---
 
 ## 📜 Citation
 
@@ -197,7 +197,7 @@ https://github.com/SamueleMara/Fruit_3DGS
 }
 ```
 
----
+--- -->
 
 ## 📬 Contact
 
