@@ -10,3 +10,19 @@ output
 build
 tensorboard_3d
 screenshots
+
+# Backups
+submodules_backup/
+diff_rast_backup/
+*.zip
+
+# External experiments
+submodules/pytorch3d/
+
+# Build artifacts
+__pycache__/
+*.pyc
+*.so
+*.egg-info/
+build/
+dist/
