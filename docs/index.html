@@ -82,8 +82,7 @@ allowing robust clustering and accurate 3D localization for robotic harvesting t
 <figure class="figure-block">
 <img class="figure" src="assets/images/Fruit3DGS_pipeline.png">
 <figcaption class="figure-caption">
-Overview of the Fruit3DGS pipeline: semantic lifting, contrastive embedding learning,
-and clustering of Gaussian primitives for instance localization.
+Overview of the Fruit3DGS pipeline: starting from unposed, unsorted RGB images (1), language-guided semantic masks (2.a) and mask instances (2.b) are extracted from 2D views and used together with Structure-from-Motion initialization (3) to train a semantically-embedded 3D Gaussian Splatting model (4). Gaussian primitives are then enriched with instance-discriminative embeddings (5) and grouped through instance-discriminative clustering (6), from which 3D Oriented Bounding Boxes (OBBS)(7) and final fruit instances are obtained.
 </figcaption>
 </figure>
 
@@ -290,5 +289,6 @@ year={2026}
 </div>
 
 </body>
+
 
 </html>
