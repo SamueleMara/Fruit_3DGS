@@ -34,7 +34,9 @@ class Camera(nn.Module):
         self.FoVx = FoVx
         self.FoVy = FoVy
         self.image_name = image_name
-
+        self.orig_width = image.width   
+        self.orig_height = image.height 
+        
         # Device
         try:
             self.data_device = torch.device(data_device)
@@ -87,7 +89,7 @@ class Camera(nn.Module):
         self.full_proj_transform = (self.world_view_transform.unsqueeze(0).bmm(self.projection_matrix.unsqueeze(0))).squeeze(0)
         self.camera_center = self.world_view_transform.inverse()[3, :3]
 
-       # --- Semantic mask loading ---
+        # --- Semantic mask loading ---
         self.mask = None
         self.has_valid_mask = False
 
@@ -107,20 +109,16 @@ class Camera(nn.Module):
 
             if mask_path is not None:
                 mask_img = imageio.imread(mask_path)
-
                 if mask_img is not None:
                     mask_tensor = torch.from_numpy(mask_img.astype(np.float32) / 255.0)
-
                     # RGB → single channel
                     if mask_tensor.ndim == 3:
                         mask_tensor = mask_tensor[..., 0]
-
                     mask_tensor_resized = cv2.resize(
                         mask_tensor.numpy(),
                         (self.image_width, self.image_height),
                         interpolation=cv2.INTER_NEAREST
                     )
-
                     # Check if mask is non-empty
                     if np.any(mask_tensor_resized > 0):
                         self.mask = torch.from_numpy(mask_tensor_resized).float().to(self.data_device)
@@ -129,8 +127,35 @@ class Camera(nn.Module):
                         self.mask = None
                         self.has_valid_mask = False
             else:
-                self.mask = None
-                self.has_valid_mask = False
+                # Fallback: merge instance masks if present (e.g. rgb_000_instance_*.png)
+                instance_pattern = os.path.join(mask_dir, f"{base_name}_instance_*")
+                instance_files = []
+                for ext in exts:
+                    instance_files.extend(glob.glob(instance_pattern + f".{ext}"))
+                if instance_files:
+                    merged = None
+                    for p in sorted(instance_files):
+                        m = imageio.imread(p)
+                        if m is None:
+                            continue
+                        m = torch.from_numpy(m.astype(np.float32) / 255.0)
+                        if m.ndim == 3:
+                            m = m[..., 0]
+                        m = cv2.resize(m.numpy(), (self.image_width, self.image_height), interpolation=cv2.INTER_NEAREST)
+                        if merged is None:
+                            merged = m
+                        else:
+                            merged = np.maximum(merged, m)
+                    if merged is not None and np.any(merged > 0):
+                        self.mask = torch.from_numpy(merged).float().to(self.data_device)
+                        self.has_valid_mask = True
+                    else:
+                        self.mask = None
+                        self.has_valid_mask = False
+                else:
+                    self.mask = None
+                    self.has_valid_mask = False
+
 
 class MiniCam:
     def __init__(self, width, height, fovy, fovx, znear, zfar, world_view_transform, full_proj_transform):

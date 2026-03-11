@@ -70,6 +70,7 @@ def getNerfppNorm(cam_info):
 
 def readColmapCameras(cam_extrinsics, cam_intrinsics, depths_params, images_folder, depths_folder, test_cam_names_list):
     cam_infos = []
+    warned_distorted_models = set()
     for idx, key in enumerate(cam_extrinsics):
         sys.stdout.write('\r')
         # the exact output you're looking for:
@@ -85,17 +86,28 @@ def readColmapCameras(cam_extrinsics, cam_intrinsics, depths_params, images_fold
         R = np.transpose(qvec2rotmat(extr.qvec))
         T = np.array(extr.tvec)
 
-        if intr.model=="SIMPLE_PINHOLE":
+        if intr.model in ("SIMPLE_PINHOLE", "SIMPLE_RADIAL", "RADIAL", "SIMPLE_RADIAL_FISHEYE", "RADIAL_FISHEYE", "FOV"):
             focal_length_x = intr.params[0]
-            FovY = focal2fov(focal_length_x, height)
-            FovX = focal2fov(focal_length_x, width)
-        elif intr.model=="PINHOLE":
+            focal_length_y = intr.params[0]
+            if intr.model != "SIMPLE_PINHOLE" and intr.model not in warned_distorted_models:
+                print(f"\n[WARNING] COLMAP camera model '{intr.model}' detected. Distortion parameters will be ignored.")
+                warned_distorted_models.add(intr.model)
+        elif intr.model in ("PINHOLE", "OPENCV", "OPENCV_FISHEYE", "FULL_OPENCV", "THIN_PRISM_FISHEYE"):
             focal_length_x = intr.params[0]
             focal_length_y = intr.params[1]
-            FovY = focal2fov(focal_length_y, height)
-            FovX = focal2fov(focal_length_x, width)
+            if intr.model != "PINHOLE" and intr.model not in warned_distorted_models:
+                print(f"\n[WARNING] COLMAP camera model '{intr.model}' detected. Distortion parameters will be ignored.")
+                warned_distorted_models.add(intr.model)
         else:
-            assert False, "Colmap camera model not handled: only undistorted datasets (PINHOLE or SIMPLE_PINHOLE cameras) supported!"
+            assert False, (
+                f"Colmap camera model not handled: {intr.model}. "
+                "Supported: SIMPLE_PINHOLE, PINHOLE, SIMPLE_RADIAL, RADIAL, "
+                "OPENCV, OPENCV_FISHEYE, FULL_OPENCV, FOV, SIMPLE_RADIAL_FISHEYE, "
+                "RADIAL_FISHEYE, THIN_PRISM_FISHEYE."
+            )
+
+        FovY = focal2fov(focal_length_y, height)
+        FovX = focal2fov(focal_length_x, width)
 
         n_remove = len(extr.name.split('.')[-1]) + 1
         depth_params = None

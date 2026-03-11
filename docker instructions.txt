@@ -1,0 +1,57 @@
+Due docker separati:
+
+Primo: 
+
+xhost +local:docker  # allow local Docker containers to use X11
+docker run -it \
+  --gpus '"device=0"' \
+  --memory=100g \
+  --memory-swap=100g \
+  --shm-size=100G \
+  -e DISPLAY=$DISPLAY \
+  -e XDG_RUNTIME_DIR=/tmp/runtime-$UID \
+  -e QT_XCB_GL_INTEGRATION=xcb_egl \
+  -e QT_QPA_PLATFORM=xcb \
+  -e NVIDIA_DRIVER_CAPABILITIES=all \
+  -v /tmp/.X11-unix:/tmp/.X11-unix \
+  -v $(pwd):/workspace \
+  -p 7007:7007 \
+  --name fruit_gs_gpu0 \
+  fruit_gs:latest \
+  /bin/bash
+
+Secondo: 
+xhost +local:docker  # allow local Docker containers to use X11
+docker run -it \
+  --gpus '"device=1"' \
+  --memory=100g \
+  --memory-swap=100g \
+  --shm-size=100G \
+  -e DISPLAY=$DISPLAY \
+  -e XDG_RUNTIME_DIR=/tmp/runtime-$UID \
+  -e QT_XCB_GL_INTEGRATION=xcb_egl \
+  -e QT_QPA_PLATFORM=xcb \
+  -e NVIDIA_DRIVER_CAPABILITIES=all \
+  -v /tmp/.X11-unix:/tmp/.X11-unix \
+  -v $(pwd):/workspace \
+  -p 7008:7007 \
+  --name fruit_gs_gpu1 \
+  fruit_gs:latest \
+  /bin/bash
+
+
+Training: 
+
+root@2decf491184a:/workspace# PYTORCH_CUDA_ALLOC_CONF=max_split_size_mb:128 python train_sem.py -s /workspace/samuele/Colmap/tree_01_filtered_scaled   --mask_dir /workspace/samuele/Colmap/tree_01_filtered_scaled/masks   --topk_contrib 10   --percent_dense 0.001  --data_device cpu
+
+Clustering: 
+
+
+
+
+
+
+
+
+
+

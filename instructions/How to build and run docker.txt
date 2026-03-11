@@ -1,0 +1,4 @@
+How to build and run Gaussian splatting docker:
+
+$ docker build -t gaussian-splatting .
+$ docker run --gpus all -it --rm gaussian-splatting

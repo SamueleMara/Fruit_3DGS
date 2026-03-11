@@ -17,6 +17,10 @@ try:
     from diff_gaussian_rasterization._C import fusedssim, fusedssim_backward
 except:
     pass
+try:
+    from diff_gaussian_rasterization import binary_mask_render_loss_cuda as _binary_mask_render_loss_cuda
+except Exception:
+    _binary_mask_render_loss_cuda = None
 
 
 # -----------------------------
@@ -102,7 +106,7 @@ def fast_ssim(img1, img2):
 # -------------------------------------
 # Binary mask render loss (weighted)
 # -------------------------------------
-def binary_mask_render_loss(gaussians_mask, contrib_indices, contrib_opacities, gt_mask, alpha_mask=None):
+def binary_mask_render_loss(gaussians_mask, contrib_indices, contrib_opacities, gt_mask, alpha_mask=None, pos_weight=1.0):
     """
     Compute differentiable binary mask loss for Gaussian contributions,
     optionally weighted by alpha_mask (e.g., mask-center weights).
@@ -117,50 +121,54 @@ def binary_mask_render_loss(gaussians_mask, contrib_indices, contrib_opacities, 
     Returns:
         scalar loss
     """
-    # contrib_indices: [H,W,K] gives gaussian idx per pixel per depth-sorted layer
     H, W, K = contrib_indices.shape
     device = gaussians_mask.device
 
-    # Validity mask for indices (-1 entries mean empty layer)
     valid_mask = (contrib_indices >= 0)
-
-    # Replace invalid indices with zero (safe indexing)
     safe_indices = torch.clamp(contrib_indices, min=0).long()
 
-    # Gather gaussian mask values per contributing gaussian
-    f_i = gaussians_mask[safe_indices]      # [H,W,K]
+    # Treat semantic field as logits and optimize through probabilities.
+    # This keeps training numerically stable and consistent with semantic CUDA rendering,
+    # which also applies a sigmoid to semantic values.
+    gaussians_prob = torch.sigmoid(gaussians_mask)
+    f_i = gaussians_prob[safe_indices]  # [H, W, K]
     f_i = f_i * valid_mask.float()
-
-    # Also mask opacities
     contrib_opacities = contrib_opacities * valid_mask.float()
 
-    # Compute cumulative transparency product (alpha compositing)
+    # Front-to-back alpha compositing
     alpha_prod = torch.cumprod(1.0 - contrib_opacities, dim=2)
+    alpha_prod = torch.cat([torch.ones((H, W, 1), device=device), alpha_prod[:, :, :-1]], dim=2)
+    F_rendered = (f_i * contrib_opacities * alpha_prod).sum(dim=2)  # [H, W]
 
-    # Shift alpha_prod to get transparency *before* each layer
-    alpha_prod = torch.cat([torch.ones((H, W, 1), device=device),
-                            alpha_prod[:, :, :-1]], dim=2)
-
-    # Rendered foreground = Σ f_i * α_i * T_i
-    F_rendered = (f_i * contrib_opacities * alpha_prod).sum(dim=2)
     F_rendered = torch.clamp(F_rendered, 0.0, 1.0)
 
-    # Optional external mask
     if alpha_mask is not None:
+        if alpha_mask.ndim == 3:
+            alpha_mask = alpha_mask.squeeze(0)
         F_rendered = F_rendered * alpha_mask
 
-    # Ensure shape matches gt
+    # Ensure same shape as gt_mask
     if F_rendered.shape != gt_mask.shape:
         F_rendered = F_rendered.squeeze(0)
 
-    # BCE loss against ground-truth binary instance mask
-    loss = F.binary_cross_entropy(F_rendered, gt_mask.float())
+    weight = None
+    if pos_weight is not None and pos_weight != 1.0:
+        weight = torch.ones_like(gt_mask, dtype=F_rendered.dtype, device=F_rendered.device)
+        weight = weight + (pos_weight - 1.0) * gt_mask.float()
+    if alpha_mask is not None:
+        weight = alpha_mask if weight is None else (weight * alpha_mask)
+
+    loss = F.binary_cross_entropy(F_rendered, gt_mask.float(), weight=weight)
     return loss
+
+
+
 
 
 # -----------------------------
 # CLUSTERING LOSSES
 # -----------------------------
+
 
 # -------------------------
 # Utilities
@@ -258,6 +266,62 @@ def loss_marginal_entropy(p, eps=1e-8):
     # Σ m log m (negative entropy)
     return (m * torch.log(m)).sum()
 
+
+def binary_mask_render_loss(gaussians_mask, contrib_indices, contrib_opacities, gt_mask, alpha_mask=None, pos_weight=1.0):
+    # Prefer fully CUDA implementation when available (forward + backward in extension).
+    use_cuda_impl = (
+        _binary_mask_render_loss_cuda is not None
+        and gaussians_mask.is_cuda
+        and contrib_indices.is_cuda
+        and contrib_opacities.is_cuda
+        and gt_mask.is_cuda
+    )
+    if use_cuda_impl:
+        # Match CUDA semantic rendering behavior: semantics are raw logits that are
+        # transformed with sigmoid before compositing.
+        gaussians_prob = torch.sigmoid(gaussians_mask)
+        alpha = alpha_mask
+        if alpha is not None and alpha.ndim == 3:
+            alpha = alpha.squeeze(0)
+        return _binary_mask_render_loss_cuda(
+            gaussians_prob,
+            contrib_indices,
+            contrib_opacities,
+            gt_mask,
+            alpha_mask=alpha,
+            pos_weight=1.0 if pos_weight is None else float(pos_weight),
+        )
+
+    # Fallback (pure PyTorch implementation)
+    H, W, K = contrib_indices.shape
+    device = gaussians_mask.device
+    valid_mask = (contrib_indices >= 0)
+    safe_indices = torch.clamp(contrib_indices, min=0).long()
+    gaussians_prob = torch.sigmoid(gaussians_mask)
+    f_i = gaussians_prob[safe_indices]
+    f_i = f_i * valid_mask.float()
+    contrib_opacities = contrib_opacities * valid_mask.float()
+    alpha_prod = torch.cumprod(1.0 - contrib_opacities, dim=2)
+    alpha_prod = torch.cat([torch.ones((H, W, 1), device=device), alpha_prod[:, :, :-1]], dim=2)
+    F_rendered = (f_i * contrib_opacities * alpha_prod).sum(dim=2)
+    F_rendered = torch.clamp(F_rendered, 0.0, 1.0)
+
+    if alpha_mask is not None:
+        if alpha_mask.ndim == 3:
+            alpha_mask = alpha_mask.squeeze(0)
+        F_rendered = F_rendered * alpha_mask
+
+    if F_rendered.shape != gt_mask.shape:
+        F_rendered = F_rendered.squeeze(0)
+
+    weight = None
+    if pos_weight is not None and pos_weight != 1.0:
+        weight = torch.ones_like(gt_mask, dtype=F_rendered.dtype, device=F_rendered.device)
+        weight = weight + (pos_weight - 1.0) * gt_mask.float()
+    if alpha_mask is not None:
+        weight = alpha_mask if weight is None else (weight * alpha_mask)
+
+    return F.binary_cross_entropy(F_rendered, gt_mask.float(), weight=weight)
 
 
 # ============================================================
@@ -518,366 +582,3 @@ def total_cluster_loss(
     grad_q_gauss += logits_grad_from_q_grads(q_i, grad_q_from_p)
 
     return total_loss, loss_vals, grad_q_gauss
-
-
-
-# ===========================================================
-#         Embedding losses
-# ===========================================================
-
-def normalize_embeddings(e, eps=1e-8):
-    """
-    L2-normalize embeddings along feature dimension.
-    e: [N, D]
-    """
-    return e / (torch.norm(e, dim=1, keepdim=True) + eps)
-
-def contrastive_loss(
-    emb,
-    idx_i,
-    idx_j,
-    labels,
-    margin=1.0
-):
-    """
-    emb:     [N, D] embedding matrix
-    idx_i:   [M] indices
-    idx_j:   [M] indices
-    labels:  [M] (1 = positive, 0 = negative)
-    """
-
-    e_i = emb[idx_i]
-    e_j = emb[idx_j]
-
-    dist = torch.norm(e_i - e_j, dim=1)
-
-    pos_loss = labels * dist.pow(2)
-    neg_loss = (1.0 - labels) * torch.clamp(margin - dist, min=0).pow(2)
-
-    return (pos_loss + neg_loss).mean()
-
-def cosine_pair_loss(
-    emb,
-    idx_i,
-    idx_j,
-    labels
-):
-    """
-    emb must be normalized
-    """
-
-    e_i = emb[idx_i]
-    e_j = emb[idx_j]
-
-    sim = (e_i * e_j).sum(dim=1)  # cosine similarity
-
-    pos_loss = labels * (1.0 - sim)
-    neg_loss = (1.0 - labels) * torch.clamp(sim, min=0.0)
-
-    return (pos_loss + neg_loss).mean()
-
-def spatial_smoothness_loss(
-    emb,
-    xyz,
-    radius=0.05
-):
-    """
-    emb: [N, D]
-    xyz: [N, 3]
-    """
-
-    # Pairwise distances in 3D
-    dist = torch.cdist(xyz, xyz)  # [N, N]
-
-    # Neighborhood mask
-    W = (dist < radius).float()
-
-    diff = emb.unsqueeze(1) - emb.unsqueeze(0)  # [N,N,D]
-    loss = (W.unsqueeze(2) * diff.pow(2)).sum(dim=2)
-
-    # Avoid trivial self-pairs
-    loss = loss * (1.0 - torch.eye(emb.size(0), device=emb.device))
-
-    return loss.mean()
-
-def info_nce_loss(
-    emb,
-    idx_anchor,
-    idx_positive,
-    temperature=0.1
-):
-    """
-    emb: [N, D] normalized
-    idx_anchor:   [M]
-    idx_positive: [M]
-    """
-
-    e_a = emb[idx_anchor]    # [M,D]
-    e_p = emb[idx_positive]  # [M,D]
-
-    logits = e_a @ emb.T     # [M,N]
-    logits = logits / temperature
-
-    labels = idx_positive
-    return F.cross_entropy(logits, labels)
-
-
-def frame_pixel_contrastive_loss(
-    emb_norm: torch.Tensor,     # [N,D] normalized
-    g_at_pix: torch.Tensor,     # [P] gaussian id per pixel (top-1), -1 invalid
-    pix_inst: torch.Tensor,     # [P] instance label per pixel, -1 background
-    pixels_per_iter: int = 20000,
-    neg_per_pos: int = 16,
-    temperature: float = 0.07,
-    bg_neg_weight: float = 6.0,
-):
-    """
-    Same-frame pixel-supervised contrastive loss.
-
-    Strategy:
-      - sample a set of pixels from this frame
-      - map each sampled pixel to its gaussian (anchor)
-      - for FG anchors (inst>=0):
-           pick one positive from SAME inst
-           pick K negatives from DIFFERENT inst
-      - for BG anchors (inst==-1):
-           pick K negatives from ANY FG (strong)
-    """
-
-    device = emb_norm.device
-    P = g_at_pix.numel()
-    if P == 0:
-        return emb_norm.new_tensor(0.0)
-
-    # sample pixels
-    M = min(pixels_per_iter, P)
-    pix_idx = torch.randint(0, P, (M,), device=device)
-
-    inst_a = pix_inst[pix_idx]                 # [M]
-    ga = g_at_pix[pix_idx].long()              # [M]
-    valid_anchor = ga >= 0
-    if not valid_anchor.any():
-        return emb_norm.new_tensor(0.0)
-
-    pix_idx = pix_idx[valid_anchor]
-    inst_a = inst_a[valid_anchor]
-    ga = ga[valid_anchor]
-
-    # useful masks
-    fg_mask_all = (pix_inst >= 0) & (g_at_pix >= 0)
-    if not fg_mask_all.any():
-        # no fg at all -> nothing to learn
-        return emb_norm.new_tensor(0.0)
-
-    fg_pixels = fg_mask_all.nonzero(as_tuple=True)[0]  # indices of FG pixels
-
-    # Build per-instance pixel lists (on GPU) for sampling positives fast
-    # (local ids per frame are small)
-    max_inst = int(pix_inst[pix_inst >= 0].max().item()) if (pix_inst >= 0).any() else -1
-    inst_to_pixels = []
-    if max_inst >= 0:
-        for cid in range(max_inst + 1):
-            idx = ((pix_inst == cid) & (g_at_pix >= 0)).nonzero(as_tuple=True)[0]
-            inst_to_pixels.append(idx)
-
-    # Precompute anchor embedding
-    ea = emb_norm[ga]  # [A,D]
-
-    # Split FG anchors vs BG anchors
-    fg_anchor = inst_a >= 0
-    bg_anchor = ~fg_anchor
-
-    loss_terms = []
-
-    # ----------------------------------------
-    # FG anchors: (pos from same instance) vs (negs other instances)
-    # ----------------------------------------
-    if fg_anchor.any():
-        ga_fg = ga[fg_anchor]
-        inst_fg = inst_a[fg_anchor]
-        ea_fg = emb_norm[ga_fg]
-
-        # sample positives: pick a pixel from same instance
-        pos_pix = torch.empty_like(inst_fg)
-        for i in range(inst_fg.numel()):
-            cid = int(inst_fg[i].item())
-            pool = inst_to_pixels[cid]
-            if pool.numel() == 0:
-                # fallback: self
-                pos_pix[i] = pix_idx[fg_anchor][i]
-            else:
-                pos_pix[i] = pool[torch.randint(0, pool.numel(), (1,), device=device)]
-
-        gp = g_at_pix[pos_pix].long()
-        ep = emb_norm[gp]
-
-        # sample negatives: from fg_pixels but different inst
-        # We'll do rejection sampling with a small number of tries (works fine in practice).
-        K = int(neg_per_pos)
-        neg_pix = torch.empty((inst_fg.numel(), K), dtype=torch.long, device=device)
-
-        # To speed up: sample candidates then filter
-        for i in range(inst_fg.numel()):
-            cid = int(inst_fg[i].item())
-            # sample a bit more than needed and take first K that differ
-            for _ in range(5):
-                cand = fg_pixels[torch.randint(0, fg_pixels.numel(), (K * 3,), device=device)]
-                good = cand[pix_inst[cand] != cid]
-                if good.numel() >= K:
-                    neg_pix[i] = good[:K]
-                    break
-            else:
-                # worst-case fallback: just use random fg (may include same inst sometimes)
-                neg_pix[i] = fg_pixels[torch.randint(0, fg_pixels.numel(), (K,), device=device)]
-
-        gn = g_at_pix[neg_pix].long()          # [Afg,K]
-        en = emb_norm[gn]                      # [Afg,K,D]
-
-        # logits
-        pos_logit = (ea_fg * ep).sum(dim=1, keepdim=True) / temperature          # [Afg,1]
-        neg_logit = (ea_fg.unsqueeze(1) * en).sum(dim=2) / temperature           # [Afg,K]
-        logits = torch.cat([pos_logit, neg_logit], dim=1)                         # [Afg, 1+K]
-        labels = torch.zeros((logits.shape[0],), dtype=torch.long, device=device) # pos=0
-
-        loss_fg = F.cross_entropy(logits, labels)
-        loss_terms.append(loss_fg)
-
-    # ----------------------------------------
-    # BG anchors: push away from FG strongly
-    # ----------------------------------------
-    if bg_anchor.any():
-        ga_bg = ga[bg_anchor]
-        ea_bg = emb_norm[ga_bg]
-
-        K = int(neg_per_pos)
-        neg_pix = fg_pixels[torch.randint(0, fg_pixels.numel(), (ga_bg.numel(), K), device=device)]
-        gn = g_at_pix[neg_pix].long()
-        en = emb_norm[gn]
-
-        # we want similarities to be LOW; use softplus(sim) as penalty
-        sim = (ea_bg.unsqueeze(1) * en).sum(dim=2) / temperature  # [Abg,K]
-        loss_bg = F.softplus(sim).mean() * float(bg_neg_weight)
-        loss_terms.append(loss_bg)
-
-    if len(loss_terms) == 0:
-        return emb_norm.new_tensor(0.0)
-
-    return torch.stack(loss_terms).mean()
-
-
-def appearance_contrastive_pair_loss(
-    emb_nodes,          # [B,D]
-    emb_nbr,            # [B,K,D]
-    rgb_nodes,          # [B,3]
-    rgb_nbr,            # [B,K,3]
-    op_nodes,           # [B,1]
-    op_nbr,             # [B,K,1]
-    sem_w,              # [B,K]  (e.g. s_i*s_j)
-    rgb_w=1.0,
-    op_w=2.0,
-    tau_pos=0.15,
-    tau_neg=0.15,
-    app_margin=0.25,    # appearance threshold where neg starts to activate
-    emb_margin=0.6,     # desired minimum embedding distance for neg pairs
-    neg_scale=1.0,
-    eps=1e-6,
-    ):
-    """
-    Returns scalar loss.
-    """
-    # embedding distance
-    d2_emb = (emb_nodes[:, None, :] - emb_nbr).pow(2).sum(dim=2)          # [B,K]
-    d_emb = torch.sqrt(d2_emb + eps)
-
-    # appearance distance
-    d_rgb = (rgb_nodes[:, None, :] - rgb_nbr).pow(2).sum(dim=2).sqrt()    # [B,K]
-    d_op  = (op_nodes[:, None, :]  - op_nbr).abs().squeeze(-1)            # [B,K]
-    d_app = rgb_w * d_rgb + op_w * d_op                                   # [B,K]
-
-    # POS: similar appearance => stronger pull
-    w_pos = torch.exp(-d_app / max(tau_pos, eps)) * sem_w                 # [B,K]
-    pos_loss = (w_pos * d2_emb).sum() / (w_pos.sum() + eps)
-
-    # NEG: dissimilar appearance => push apart (hinge)
-    # gate where d_app > app_margin
-    w_neg = torch.sigmoid((d_app - app_margin) / max(tau_neg, eps)) * sem_w
-    neg_hinge = F.relu(emb_margin - d_emb)                                # [B,K]
-    neg_loss = (w_neg * neg_hinge.pow(2)).sum() / (w_neg.sum() + eps)
-
-    return pos_loss + neg_scale * neg_loss
-
-
-def centroid_instance_pull_loss(
-    emb_norm: torch.Tensor,   # [N,D] normalized gaussian embeddings
-    topk0: torch.Tensor,      # [P] top-1 gaussian per pixel for this camera (frame-local)
-    inst_pix: torch.Tensor,   # [Q] flattened pixels (frame-local)
-    centroid_g: int,          # centroid gaussian id (global gaussian index)
-    centroid_pixel: int,      # flat centroid pixel index (frame-local)
-    W: int,
-    sigma_px: float = 25.0,
-    max_pix: int = 8000,
-    min_valid: int = 32,
-    eps: float = 1e-6,
-):
-    device = emb_norm.device
-
-    if inst_pix is None or inst_pix.numel() < int(min_valid):
-        return emb_norm.new_tensor(0.0)
-
-    # sanity centroid gaussian
-    if centroid_g is None:
-        return emb_norm.new_tensor(0.0)
-    centroid_g = int(centroid_g)
-    if centroid_g < 0 or centroid_g >= emb_norm.shape[0]:
-        return emb_norm.new_tensor(0.0)
-
-    # subsample pixels (keep on device)
-    if inst_pix.numel() > int(max_pix):
-        sel = torch.randint(0, inst_pix.numel(), (int(max_pix),), device=device)
-        inst_pix = inst_pix[sel]
-
-    # ensure topk0 / inst_pix on device
-    if topk0.device != device:
-        topk0 = topk0.to(device)
-    if inst_pix.device != device:
-        inst_pix = inst_pix.to(device)
-
-    P = int(topk0.shape[0])
-    inst_pix = inst_pix[(inst_pix >= 0) & (inst_pix < P)]
-    if inst_pix.numel() < int(min_valid):
-        return emb_norm.new_tensor(0.0)
-
-    # centroid pixel -> (cx, cy) in pixel coords
-    centroid_pixel = int(centroid_pixel)
-    if centroid_pixel < 0 or centroid_pixel >= P:
-        return emb_norm.new_tensor(0.0)
-
-    cx = float(centroid_pixel % int(W))
-    cy = float(centroid_pixel // int(W))
-
-    # pixel -> (x,y)
-    y = (inst_pix // int(W)).float()
-    x = (inst_pix %  int(W)).float()
-
-    # use top-1 gaussian at each instance pixel
-    g_p = topk0[inst_pix].long()
-    valid = (g_p >= 0)
-    if valid.sum().item() < int(min_valid):
-        return emb_norm.new_tensor(0.0)
-
-    g_p = g_p[valid]
-    x   = x[valid]
-    y   = y[valid]
-
-    # weights stronger near centroid pixel
-    d2 = (x - cx).pow(2) + (y - cy).pow(2)
-    w = torch.exp(-d2 / (2.0 * float(sigma_px) * float(sigma_px)))
-    wsum = w.sum()
-    if float(wsum.item()) < 1e-6:
-        return emb_norm.new_tensor(0.0)
-
-    e_c = emb_norm[centroid_g]  # [D]
-    e_p = emb_norm[g_p]         # [Qv,D]
-
-    loss = (w[:, None] * (e_p - e_c[None, :]).pow(2)).sum() / (wsum + eps)
-    return loss

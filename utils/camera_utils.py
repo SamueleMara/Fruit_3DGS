@@ -17,27 +17,36 @@ import cv2
 
 WARNED = False
 
-def loadCam(args, id, cam_info, resolution_scale, is_nerf_synthetic, is_test_dataset, mask_dir=None):
+def loadCam(args, id, cam_info, resolution_scale, is_nerf_synthetic, is_test_dataset, mask_dir=None, invdepthmap=None):
     image = Image.open(cam_info.image_path)
 
-    # --- Depth loading code remains the same ---
-    if cam_info.depth_path != "":
-        try:
-            if is_nerf_synthetic:
-                invdepthmap = cv2.imread(cam_info.depth_path, -1).astype(np.float32) / 512
-            else:
-                invdepthmap = cv2.imread(cam_info.depth_path, -1).astype(np.float32) / float(2**16)
-        except FileNotFoundError:
-            print(f"Error: The depth file at path '{cam_info.depth_path}' was not found.")
-            raise
-        except IOError:
-            print(f"Error: Unable to open the image file '{cam_info.depth_path}'. It may be corrupted or an unsupported format.")
-            raise
-        except Exception as e:
-            print(f"An unexpected error occurred when trying to read depth at {cam_info.depth_path}: {e}")
-            raise
+    # Use in-memory depth map if provided
+    if invdepthmap is None:
+        if cam_info.depth_path != "":
+            try:
+                depth_img = cv2.imread(cam_info.depth_path, -1)
+                if depth_img is None:
+                    print(f"[WARNING] cv2.imread failed for depth file: {cam_info.depth_path}. File missing or unreadable.")
+                    invdepthmap = None
+                else:
+                    if is_nerf_synthetic:
+                        invdepthmap = depth_img.astype(np.float32) / 512
+                    else:
+                        invdepthmap = depth_img.astype(np.float32) / float(2**16)
+            except FileNotFoundError:
+                print(f"Error: The depth file at path '{cam_info.depth_path}' was not found.")
+                invdepthmap = None
+            except IOError:
+                print(f"Error: Unable to open the image file '{cam_info.depth_path}'. It may be corrupted or an unsupported format.")
+                invdepthmap = None
+            except Exception as e:
+                print(f"An unexpected error occurred when trying to read depth at {cam_info.depth_path}: {e}")
+                invdepthmap = None
+        else:
+            invdepthmap = None
     else:
-        invdepthmap = None
+        # Use provided in-memory depth map
+        pass  # invdepthmap is already set
 
     # --- Resolution scaling code remains the same ---
     orig_w, orig_h = image.size
@@ -55,7 +64,7 @@ def loadCam(args, id, cam_info, resolution_scale, is_nerf_synthetic, is_test_dat
         scale = float(global_down) * float(resolution_scale)
         resolution = (int(orig_w / scale), int(orig_h / scale))
 
-    return Camera(
+    cam = Camera(
         resolution,
         colmap_id=cam_info.uid,
         R=cam_info.R,
@@ -71,14 +80,54 @@ def loadCam(args, id, cam_info, resolution_scale, is_nerf_synthetic, is_test_dat
         train_test_exp=args.train_test_exp,
         is_test_dataset=is_test_dataset,
         is_test_view=cam_info.is_test,
-        mask_dir=mask_dir  # <-- Pass mask_dir here
+        mask_dir=mask_dir
     )
 
-def cameraList_from_camInfos(cam_infos, resolution_scale, args, is_nerf_synthetic, is_test_dataset, mask_dir=None):
+    # Enforce mask presence
+    if mask_dir is not None and not cam.has_valid_mask:
+        return None
+
+    return cam
+
+def cameraList_from_camInfos(
+    cam_infos,
+    resolution_scale,
+    args,
+    is_nerf_synthetic,
+    is_test_dataset,
+    mask_dir=None,
+    invdepthmaps=None
+):
     camera_list = []
 
     for id, c in enumerate(cam_infos):
-        camera_list.append(loadCam(args, id, c, resolution_scale, is_nerf_synthetic, is_test_dataset, mask_dir=mask_dir))
+        invdepthmap = None
+        if invdepthmaps is not None:
+            # invdepthmaps can be a dict (by image_name or uid) or a list
+            if isinstance(invdepthmaps, dict):
+                invdepthmap = invdepthmaps.get(getattr(c, 'image_name', None))
+                if invdepthmap is None:
+                    invdepthmap = invdepthmaps.get(getattr(c, 'uid', None))
+            elif isinstance(invdepthmaps, list) and id < len(invdepthmaps):
+                invdepthmap = invdepthmaps[id]
+        cam = loadCam(
+            args,
+            id,
+            c,
+            resolution_scale,
+            is_nerf_synthetic,
+            is_test_dataset,
+            mask_dir=mask_dir,
+            invdepthmap=invdepthmap
+        )
+
+        if cam is not None:
+            camera_list.append(cam)
+
+    print(
+        f"[INFO] Cameras kept after mask filtering: "
+        f"{len(camera_list)} / {len(cam_infos)}"
+    )
 
     return camera_list
 

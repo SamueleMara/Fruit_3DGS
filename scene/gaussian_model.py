@@ -17,13 +17,12 @@ import os
 import json
 from utils.system_utils import mkdir_p
 from plyfile import PlyData, PlyElement
-from utils.sh_utils import RGB2SH,SH2RGB
+from utils.sh_utils import RGB2SH
 from simple_knn._C import distCUDA2
 from utils.graphics_utils import BasicPointCloud
 from utils.general_utils import strip_symmetric, build_scaling_rotation
-from utils.visualize_clusters import save_cluster_obbs_json
 
-try: 
+try:
     from diff_gaussian_rasterization import SparseGaussianAdam
 except:
     pass
@@ -75,7 +74,6 @@ class GaussianModel:
         # -----------------------------
         self.instance_logits = None   # will be created later
         self.instance_ids = None      # hard labels (no grad) 
-        self.instance_embed = None   # optional per-Gaussian embedding
 
     def capture(self):
         return (
@@ -129,11 +127,7 @@ class GaussianModel:
     @property
     def get_xyz(self):
         return self._xyz
-
-    @property
-    def get_sem(self):
-        return self.semantic_mask
-        
+    
     @property
     def get_features(self):
         features_dc = self._features_dc
@@ -151,6 +145,14 @@ class GaussianModel:
     @property
     def get_opacity(self):
         return self.opacity_activation(self._opacity)
+    
+    @property
+    def get_semantic_mask(self):
+        """Return semantic mask values if they exist, otherwise None"""
+        if self.semantic_mask is not None:
+            return self.semantic_mask
+        else:
+            return None
     
     @property
     def get_exposure(self):
@@ -197,8 +199,8 @@ class GaussianModel:
         self.pretrained_exposures = None
         exposure = torch.eye(3, 4, device="cuda")[None].repeat(len(cam_infos), 1, 1)
         self._exposure = nn.Parameter(exposure.requires_grad_(True))
-        # initialize semantic mask (optional) as a learnable per-gaussian scalar in [0,1]
-        self.semantic_mask = nn.Parameter(0.5 * torch.ones((self.get_xyz.shape[0],), device="cuda"))
+        # Semantic field is optimized as logits; 0.0 => sigmoid 0.5 neutral prior.
+        self.semantic_mask = nn.Parameter(torch.zeros((self.get_xyz.shape[0],), device="cuda"))
 
     def training_setup(self, training_args):
         self.percent_dense = training_args.percent_dense
@@ -217,7 +219,8 @@ class GaussianModel:
 
         # Add semantic mask param group before creating optimizer, if present
         if self.semantic_mask is not None:
-            l.append({'params': [self.semantic_mask], 'lr': training_args.opacity_lr, "name": "semantic_mask"})
+            # Use a conservative LR for semantic logits to avoid mask-loss domination.
+            l.append({'params': [self.semantic_mask], 'lr': training_args.feature_lr, "name": "semantic_mask"})
 
         if self.optimizer_type == "default":
             self.optimizer = torch.optim.Adam(l, lr=0.0, eps=1e-15)
@@ -284,7 +287,6 @@ class GaussianModel:
         # semantics if present
         if self.semantic_mask is not None:
             semantics = self.semantic_mask.detach().cpu().numpy()[..., None]  # shape (N,1)
-            # semantics =  self.torch.sigmoid(semantic_mask).detach().cpu().numpy()[..., None]
         else:
             semantics = None
 
@@ -367,8 +369,8 @@ class GaussianModel:
             print(f"[INFO] Loaded semantics from PLY (range: {semantics_arr.min():.3f}-{semantics_arr.max():.3f})")
         else:
             # keep default neutral mask if not present
-            self.semantic_mask = nn.Parameter(0.5 * torch.ones((self.get_xyz.shape[0],), device="cuda"))
-            print("[WARN] No semantics found in PLY — initialized to 0.5")
+            self.semantic_mask = nn.Parameter(torch.zeros((self.get_xyz.shape[0],), device="cuda"))
+            print("[WARN] No semantics found in PLY — initialized to neutral logits (0.0)")
 
         self.active_sh_degree = self.max_sh_degree
         
@@ -458,9 +460,9 @@ class GaussianModel:
 
         # --- Handle semantic mask extension (extension only) ---
         if self.semantic_mask is not None:
-            # If caller didn't supply a semantic extension, init new values to 0.5
+            # If caller didn't supply a semantic extension, initialize neutral logits.
             if new_semantic_mask is None:
-                new_semantic_mask = 0.5 * torch.ones((new_xyz.shape[0],), device=self.semantic_mask.device)
+                new_semantic_mask = torch.zeros((new_xyz.shape[0],), device=self.semantic_mask.device)
             # extension only (do not concatenate existing mask here)
             d["semantic_mask"] = new_semantic_mask
 
@@ -553,12 +555,20 @@ class GaussianModel:
         grads = self.xyz_gradient_accum / self.denom
         grads[grads.isnan()] = 0.0
 
-        self.tmp_radii = radii
+        # Robust assignment: ensure tmp_radii is always a tensor
+        if radii is not None and isinstance(radii, torch.Tensor):
+            self.tmp_radii = radii
+        elif hasattr(self, 'max_radii2D') and isinstance(self.max_radii2D, torch.Tensor):
+            self.tmp_radii = self.max_radii2D.clone()
+        else:
+            self.tmp_radii = torch.zeros(self.get_xyz.shape[0], device=self.get_xyz.device)
+
         self.densify_and_clone(grads, max_grad, extent)
         self.densify_and_split(grads, max_grad, extent)
 
         prune_mask = (self.get_opacity < min_opacity).squeeze()
-        if max_screen_size:
+        # Only apply screen size pruning if max_screen_size is a valid scalar
+        if max_screen_size is not None and isinstance(max_screen_size, (int, float)) and max_screen_size > 0:
             big_points_vs = self.max_radii2D > max_screen_size
             big_points_ws = self.get_scaling.max(dim=1).values > 0.1 * extent
             prune_mask = torch.logical_or(torch.logical_or(prune_mask, big_points_vs), big_points_ws)
@@ -572,19 +582,10 @@ class GaussianModel:
         self.xyz_gradient_accum[update_filter] += torch.norm(viewspace_point_tensor.grad[update_filter,:2], dim=-1, keepdim=True)
         self.denom[update_filter] += 1
 
-    # --------------------------------------------------------------------------
-    # NEW FUNCTIONS: 
-    # --------------------------------------------------------------------------
 
-    # --------------------------------------------------------------------------
-    # Save the clustered ply with an additional cluster_id field
-    # --------------------------------------------------------------------------
-    def save_clustered_ply(self, path, cluster_ids=None, save_obbs: bool = False,):
-       
+    def save_clustered_ply(self, path, cluster_ids=None):
         """
-            Save this Gaussian model as a PLY file, optionally including cluster IDs.
-            Also saves a second PLY (suffix: _no_bkg) that excludes background points (cluster_id < 0)
-            when cluster_ids is provided.
+        Save this Gaussian model as a PLY file, optionally including cluster IDs.
         """
         mkdir_p(os.path.dirname(path))
 
@@ -599,28 +600,21 @@ class GaussianModel:
         # semantics if present
         if self.semantic_mask is not None:
             semantics = self.semantic_mask.detach().cpu().numpy()[..., None]
-            # semantics = torch.sigmoid(self.semantic_mask.detach()).cpu().numpy()[..., None]  # (N,1) in [0,1]
         else:
             semantics = None
 
         # build dtype list
         dtype_full = [(attribute, 'f4') for attribute in self.construct_list_of_attributes()]
-
-        # cluster_ids if present
         if cluster_ids is not None:
             dtype_full.append(('cluster_id', 'i4'))
 
-        # -------------------------
-        # FULL PLY (as before)
-        # -------------------------
         elements = np.empty(xyz.shape[0], dtype=dtype_full)
 
+        # assemble attributes
         attrs = [xyz, normals, f_dc, f_rest, opacities, scale, rotation]
         attributes = np.concatenate([a if a.ndim == 2 else a.reshape(a.shape[0], -1) for a in attrs], axis=1)
-
         if semantics is not None:
             attributes = np.concatenate((attributes, semantics), axis=1)
-
         if cluster_ids is not None:
             cluster_np = cluster_ids.detach().cpu().numpy()[..., None]
             attributes = np.concatenate((attributes, cluster_np), axis=1)
@@ -628,67 +622,9 @@ class GaussianModel:
         elements[:] = list(map(tuple, attributes))
         el = PlyElement.describe(elements, 'vertex')
         PlyData([el]).write(path)
+
         print(f"[OK] Clustered PLY saved at {path}")
 
-        # -------------------------
-        # NO-BACKGROUND PLY
-        # -------------------------
-        if cluster_ids is not None:
-            cid = cluster_ids.detach().cpu().numpy()
-            mask = cid >= 0
-
-            no_bkg_path = os.path.splitext(path)[0] + "_no_bkg.ply"
-
-            xyz_nb = xyz[mask]
-            normals_nb = normals[mask]
-            f_dc_nb = f_dc[mask]
-            f_rest_nb = f_rest[mask]
-            opacities_nb = opacities[mask]
-            scale_nb = scale[mask]
-            rotation_nb = rotation[mask]
-            semantics_nb = semantics[mask] if semantics is not None else None
-            cluster_nb = cid[mask][..., None]  # keep cluster_id field
-
-            elements_nb = np.empty(xyz_nb.shape[0], dtype=dtype_full)
-
-            attrs_nb = [xyz_nb, normals_nb, f_dc_nb, f_rest_nb, opacities_nb, scale_nb, rotation_nb]
-            attributes_nb = np.concatenate([a if a.ndim == 2 else a.reshape(a.shape[0], -1) for a in attrs_nb], axis=1)
-
-            if semantics_nb is not None:
-                attributes_nb = np.concatenate((attributes_nb, semantics_nb), axis=1)
-
-            attributes_nb = np.concatenate((attributes_nb, cluster_nb), axis=1)
-
-            elements_nb[:] = list(map(tuple, attributes_nb))
-            el_nb = PlyElement.describe(elements_nb, 'vertex')
-            PlyData([el_nb]).write(no_bkg_path)
-
-            kept = int(mask.sum())
-            total = int(mask.size)
-            print(f"[OK] No-background clustered PLY saved at {no_bkg_path} (kept {kept}/{total}, {100.0*kept/max(total,1):.2f}%)")
-
-            # ----------------------------------------------------------------------
-            # NEW: Compute + save OBBs for no-background clusters as JSON
-            # ----------------------------------------------------------------------
-            if save_obbs:
-                obb_json_path = os.path.splitext(path)[0] + "_no_bkg_obbs.json"
-
-                cid_nb = cid[mask].astype(np.int32)  # (kept,)
-
-                # If your save_cluster_obbs_json doesn't accept min_points/eps yet,
-                # just remove those keyword args.
-                result = save_cluster_obbs_json(
-                    xyz=xyz_nb,
-                    cluster_ids=cid_nb,
-                    json_out_path=obb_json_path,
-                    method="pca",   # or "minimal"
-                )
-
-                print(f"[OK] Saved {len(result['boxes'])} cluster OBBs to {obb_json_path}")
-
-    # --------------------------------------------------------------------------
-    # Set the instance fields (hard and soft assignment)
-    # --------------------------------------------------------------------------
     def set_instance_fields(self, num_points, num_instances, device):
         """
         Create and initialize instance_logits + instance_ids.
@@ -698,25 +634,6 @@ class GaussianModel:
         self.instance_logits = torch.nn.Parameter(
             torch.zeros(num_points, num_instances, device=device)
         )
+
         # non-trainable hard labels: [N]
         self.instance_ids = torch.zeros(num_points, dtype=torch.long, device=device)
-
-    # --------------------------------------------------------------------------
-    # Get the RGB values (computed from SHs) and opacity
-    # --------------------------------------------------------------------------
-    @torch.no_grad()
-    def get_rgb_opacity(self, clamp_rgb=True):
-        """
-        Returns:
-        rgb: [N,3] in approx [0,1]
-        op:  [N,1] in [0,1]
-        """
-        fdc = self.get_features_dc.detach().squeeze(1)  # [N,3]
-        rgb = SH2RGB(fdc)
-        if clamp_rgb:
-            rgb = rgb.clamp(0.0, 1.0)
-
-        op = self.get_opacity.detach()  # [N,1]
-        if op.ndim == 1:
-            op = op[:, None]
-        return rgb, op

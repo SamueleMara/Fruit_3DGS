@@ -69,11 +69,15 @@ class PipelineParams(ParamGroup):
         self.compute_cov3D_python = False
         self.debug = False
         self.antialiasing = False
+        self.topk_depth_weight = 0.0
+        self.topk_depth_sigma = 1.0
+        self.topk_depth_sort = False
+        self.topk_depth_blend = False
         super().__init__(parser, "Pipeline Parameters")
 
 class OptimizationParams(ParamGroup):
     def __init__(self, parser):
-        self.iterations = 30_000
+        self.iterations = 20_000
         self.position_lr_init = 0.00016
         self.position_lr_final = 0.0000016
         self.position_lr_delay_mult = 0.01
@@ -90,7 +94,11 @@ class OptimizationParams(ParamGroup):
         self.lambda_dssim = 0.2
         self.lambda_mask = 0.1  
         self.mask_weight_init = 0.01
-        self.mask_weight_final = 1.0
+        self.mask_weight_final = 0.2
+        self.mask_start_iter = 5000
+        self.mask_loss_pos_weight = 1.0
+        self.photo_loss_mask = "none"
+        self.photo_loss_mask_thresh = 0.5
         self.densification_interval = 100
         self.opacity_reset_interval = 3000
         self.densify_from_iter = 500
@@ -98,8 +106,24 @@ class OptimizationParams(ParamGroup):
         self.densify_grad_threshold = 0.0002
         self.depth_l1_weight_init = 1.0
         self.depth_l1_weight_final = 0.01
+        self.depth_l1_start_iter = 5000
+        self.depth_loss_scale = 1.0
         self.random_background = False
         self.optimizer_type = "default"
+        
+        # Enhanced depth optimization parameters
+        self.depth_smooth_weight = 0.0  # Smoothness regularization (0.05-0.1)
+        self.depth_magnitude_weight = 0.0  # Magnitude consistency (0.02-0.05)
+        self.depth_range_weight = 0.0  # Range regularization (0.01-0.02)
+        self.depth_consistency_weight = 0.0  # Consistency loss (0.01-0.05)
+        self.use_edge_aware_depth_weighting = False  # Edge-aware weighting
+        self.depth_loss_multiscale = False  # Multi-scale depth loss
+        self.depth_loss_scales = "1,2,4"  # Scales for multi-scale loss
+        self.depth_loss_warmup_steps = 0  # Warmup steps (0 = disabled)
+        self.depth_loss_plateau_boost = False  # Adaptive boosting
+        self.depth_loss_plateau_patience = 15  # Plateau patience
+        self.depth_loss_plateau_boost_factor = 2.0  # Boost multiplier
+        self.depth_anything_use_seeds = False  # Off by default: prevents noisy auto-seeding
         
         super().__init__(parser, "Optimization Parameters")
 

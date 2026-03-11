@@ -1,0 +1,9 @@
+Comando Gaussian Splatting Semantico: 
+
+-Training:
+(gaussian_splatting) samuelemara@DTI-25859-UBUNTU:~/gaussian-splatting-seg$ python train_sem.py -s /home/samuelemara/colmap/samuele/lemons_only_sam2/manual_traj --mask_dir /home/samuelemara/colmap/samuele/lemons_only_sam2/manual_traj/semantics --topk_contrib 10 --percent_dense 0.001
+
+-Filtering:
+(gaussian_splatting) samuelemara@DTI-25859-UBUNTU:~/gaussian-splatting-seg$ python filter_train.py 
+parametri: semantic_threshold=0.7
+
