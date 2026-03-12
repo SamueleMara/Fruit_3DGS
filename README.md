@@ -703,24 +703,14 @@ If no valid depth priors are loaded and runtime priors are disabled, depth loss 
 
 ### CUDA rasterizer changes in this fork
 
-The differentiable rasterizer (`submodules/diff-gaussian-rasterization`) includes stability and feature additions:
+The differentiable rasterizer (`submodules/diff-gaussian-rasterization`) includes depth-focused additions:
 
-- **NVCC/device compatibility cleanup**
-  - Removed GLM usage in CUDA device code paths.
-  - Switched to CUDA-native `float3/float4` and custom `mat3`.
-  - Added column-major `mat3` helpers in `cuda_rasterizer/auxiliary.h`.
+- **Depth-aware top-k contribution support**
+  - Top-k contributor tracking supports depth-weighted scoring.
+  - Optional depth sorting/blending can be enabled for contributor stacks.
 
-- **Semantic-only safety guards**
-  - `preprocessCUDA` now handles optional null pointers (e.g. SH/color/opacity inputs) safely.
-  - Avoids illegal memory access in semantic-only render paths.
-
-- **Depth-aware contribution support**
-  - Top-k contributor tracking supports depth-weighted scoring and optional depth sorting/blending.
-  - Expected inverse depth accumulation is preserved in rendering output.
-
-- **Semantic computation inside CUDA**
-  - Semantic rasterization kernel accumulates semantic outputs directly on GPU.
-  - Optional sigmoid mapping is applied in-kernel before accumulation.
+- **Expected inverse-depth output support**
+  - Expected inverse-depth accumulation is preserved in rendering output for depth supervision.
 
 ### Exposure compensation
 To compensate for exposure changes in the different input images we optimize an affine transformation for each image just as in [Hierarchical 3dgs](https://repo-sam.inria.fr/fungraph/hierarchical-3d-gaussians/).  
