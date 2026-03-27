@@ -1,5 +1,5 @@
 
-# 🍋🍎🍏 FRUIT3DGS 🍏🍎🍋 
+# 🍋🍎🍏 Fruit3DGS 🍏🍎🍋 
 ## Fruit Counting and Localization with 3D Gaussian Splatting and Contrastive Learning
 
 <p align="center">
